@@ -1,0 +1,93 @@
+name: Build Windows x64
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TARGET: x86_64-pc-windows-msvc
+  PDFIUM_TAG: chromium%2F8152
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-xwin
+        run: cargo install cargo-xwin --locked
+
+      - name: Build Windows x64
+        run: cargo xwin build -p winfinder-app --release --target "$TARGET"
+
+      - name: Verify PE32+ x86-64
+        run: |
+          file "target/$TARGET/release/winFinder.exe"
+          file "target/$TARGET/release/winFinder.exe" | grep -q "PE32+ executable"
+
+      - name: Download PDFium
+        run: |
+          curl -L --fail --retry 3 -o /tmp/pdfium-win-x64.tgz \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-win-x64.tgz"
+          mkdir -p /tmp/pdfium
+          tar -xzf /tmp/pdfium-win-x64.tgz -C /tmp/pdfium
+          find /tmp/pdfium -name "pdfium.dll" -print
+
+      - name: Package portable zip
+        id: package
+        run: |
+          set -eu
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ "${GITHUB_REF_TYPE:-}" != "tag" ]; then
+            VERSION="0.1.0"
+          fi
+          ZIP="winFinder-${VERSION}-windows-x64.zip"
+
+          mkdir -p dist/winFinder
+          cp "target/$TARGET/release/winFinder.exe" dist/winFinder/
+          PDFIUM_DLL="$(find /tmp/pdfium -name 'pdfium.dll' | head -n 1)"
+          test -n "$PDFIUM_DLL"
+          cp "$PDFIUM_DLL" dist/winFinder/
+          cp README.md LICENSE THIRD_PARTY_NOTICES.md dist/winFinder/
+          cp assets/fonts/OFL.txt dist/winFinder/Pretendard-OFL.txt
+          mkdir -p dist/winFinder/pdfium-licenses
+          cp -R /tmp/pdfium/licenses/. dist/winFinder/pdfium-licenses/
+          cp /tmp/pdfium/LICENSE dist/winFinder/pdfium-licenses/LICENSE
+
+          (cd dist/winFinder && zip -r "../../${ZIP}" .)
+          shasum -a 256 "${ZIP}" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          echo "zip=${ZIP}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: winFinder-windows-x64
+          path: |
+            ${{ steps.package.outputs.zip }}
+            SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.package.outputs.zip }}
+            SHA256SUMS.txt
+          generate_release_notes: true
