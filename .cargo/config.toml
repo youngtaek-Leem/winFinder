@@ -1,0 +1,7 @@
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=/DELAYLOAD:mfplat.dll",
+    "-C", "link-arg=/DELAYLOAD:mfreadwrite.dll",
+    "-C", "link-arg=delayimp.lib",
+]

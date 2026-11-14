@@ -77,6 +77,14 @@ cargo xwin build -p winfinder-app --release --target x86_64-pc-windows-msvc
 - 오디오는 `rodio`로 재생합니다.
 - 동영상은 Windows Media Foundation으로 재생합니다. 오디오 트랙은 최대 128MB PCM까지 미리 디코딩하며, 이를 넘는 긴 영상은 무음으로 재생됩니다.
 
+## 실행 문제 해결
+
+- 다운로드한 zip 파일의 속성에서 **차단 해제(Unblock)** 를 선택한 뒤 압축을 완전히 풀어 주세요.
+- Windows SmartScreen이 표시되면 **추가 정보 → 실행** 을 선택하세요.
+- v0.1.2부터 Visual C++ 재배포 패키지가 필요 없도록 정적 CRT로 빌드합니다.
+- 실행 중 오류 창이 표시되면 `%APPDATA%\winFinder\startup-error.log` 또는 `crash.log` 내용을 확인해 주세요.
+- 이 앱은 OpenGL 3.2 이상이 필요합니다. 원격 데스크톱이나 가상 머신에서는 GPU 가속/드라이버를 확인하세요.
+
 ## 라이선스
 
 MIT. 번들 폰트 및 PDFium 라이선스는 `THIRD_PARTY_NOTICES.md`를 참고하세요.

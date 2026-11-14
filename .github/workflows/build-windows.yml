@@ -39,6 +39,10 @@ jobs:
         run: |
           file "target/$TARGET/release/winFinder.exe"
           file "target/$TARGET/release/winFinder.exe" | grep -q "PE32+ executable"
+          if objdump -p "target/$TARGET/release/winFinder.exe" | grep -q "VCRUNTIME140"; then
+            echo "winFinder.exe still depends on the dynamic MSVC runtime" >&2
+            exit 1
+          fi
 
       - name: Download PDFium
         run: |
@@ -54,7 +58,7 @@ jobs:
           set -eu
           VERSION="${GITHUB_REF_NAME#v}"
           if [ "${GITHUB_REF_TYPE:-}" != "tag" ]; then
-            VERSION="0.1.0"
+            VERSION="$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['package']['version'])")"
           fi
           ZIP="winFinder-${VERSION}-windows-x64.zip"
 

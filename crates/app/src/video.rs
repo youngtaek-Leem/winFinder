@@ -101,6 +101,15 @@ mod imp {
         }
     }
 
+    fn media_foundation_available() -> bool {
+        use windows::Win32::System::LibraryLoader::LoadLibraryW;
+        use windows::core::w;
+
+        unsafe {
+            LoadLibraryW(w!("mfplat.dll")).is_ok() && LoadLibraryW(w!("mfreadwrite.dll")).is_ok()
+        }
+    }
+
     fn wide(path: &Path) -> Vec<u16> {
         path.as_os_str()
             .encode_wide()
@@ -132,6 +141,9 @@ mod imp {
         stop: &AtomicBool,
         paused: &AtomicBool,
     ) -> Result<(), String> {
+        if !media_foundation_available() {
+            return Err("동영상 재생에 필요한 Windows Media Foundation을 찾을 수 없습니다".into());
+        }
         with_media_foundation(|| {
             let audio = if stop.load(Ordering::Relaxed) {
                 None
