@@ -33,3 +33,15 @@ jobs:
 
       - name: Windows target check
         run: cargo check --workspace --target x86_64-pc-windows-msvc
+
+  windows-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Video decode smoke test
+        run: cargo test -p winfinder-app --bin winFinder video -- --nocapture

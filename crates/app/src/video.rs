@@ -466,6 +466,48 @@ mod imp {
             }
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::path::PathBuf;
+
+        fn fixture(name: &str) -> PathBuf {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures")
+                .join(name)
+        }
+
+        #[test]
+        fn decodes_video_frames() {
+            let path = fixture("sample.wmv");
+            let shared = Shared {
+                frame: Mutex::new(None),
+                error: Mutex::new(None),
+                finished: AtomicBool::new(false),
+            };
+            let stop = AtomicBool::new(false);
+            let paused = AtomicBool::new(false);
+            with_media_foundation(|| decode_video(&path, &shared, &stop, &paused, None))
+                .expect("decode");
+            let frame = shared.frame.lock().unwrap().take().expect("frame");
+            assert_eq!(frame.width, 160);
+            assert_eq!(frame.height, 120);
+            assert_eq!(frame.rgba.len(), 160 * 120 * 4);
+        }
+
+        #[test]
+        fn decodes_audio_samples() {
+            let path = fixture("sample.wav");
+            let stop = AtomicBool::new(false);
+            let (sample_rate, channels, pcm) = with_media_foundation(|| decode_audio(&path, &stop))
+                .expect("decode")
+                .expect("audio");
+            assert!(sample_rate > 0);
+            assert!(channels > 0);
+            assert!(!pcm.is_empty());
+        }
+    }
 }
 
 #[cfg(not(windows))]
