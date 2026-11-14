@@ -7,7 +7,7 @@ macOS Finder 스타일의 Windows x64 파일 탐색기입니다. Rust + `eframe`
 - **빠른 파일 목록**: Windows `FindFirstFileExW` 배치 API(`FindExInfoBasic`, `FIND_FIRST_EX_LARGE_FETCH`) 사용, 가상화 리스트로 수만 개 항목도 부드럽게 표시
 - **Finder 스타일 UI**: 사이드바(즐겨찾기/드라이브), 브레드크럼, 정렬(이름/크기/수정일/유형), 숨김 파일 토글, 현재 폴더 필터
 - **미리보기**: `Space`로 Quick Look 스타일 미리보기
-  - 이미지, 텍스트/코드(CP949/EUC-KR 자동 감지), Markdown, PDF, 오디오 재생
+  - 이미지, 텍스트/코드(CP949/EUC-KR 자동 감지), Markdown, PDF, 오디오, 동영상 재생
   - 대용량 파일은 앞부분만 표시, 미지원 형식은 메타데이터 카드 표시
 - **멀티뷰**: 최대 2×2(4패널), `1×1 / 1×2 / 2×2` 레이아웃, 패널별 독립 경로/히스토리/정렬/스크롤
 - **탭**: 패널당 최대 10개 탭, 패널별 히스토리 유지
@@ -57,6 +57,8 @@ cargo xwin build -p winfinder-app --release --target x86_64-pc-windows-msvc
 
 ## 릴리스
 
+최신 다운로드: <https://github.com/youngtaek-Leem/winFinder/releases/latest>
+
 `v*` 태그를 push하면 `.github/workflows/build-windows.yml`이 실행되어 다음을 GitHub Release에 첨부합니다.
 
 - `winFinder-<version>-windows-x64.zip` (exe + `pdfium.dll` + 문서 + 폰트 라이선스)
@@ -73,7 +75,7 @@ cargo xwin build -p winfinder-app --release --target x86_64-pc-windows-msvc
 
 - PDF 미리보기는 `pdfium.dll`이 필요합니다. 릴리스 zip에 포함되며, 없으면 메타데이터 카드로 대체됩니다.
 - 오디오는 `rodio`로 재생합니다.
-- 비디오는 현재 메타데이터와 "기본 앱으로 열기"를 제공합니다. (Windows Media Foundation 재생은 후속 작업)
+- 동영상은 Windows Media Foundation으로 재생합니다. 오디오 트랙은 최대 128MB PCM까지 미리 디코딩하며, 이를 넘는 긴 영상은 무음으로 재생됩니다.
 
 ## 라이선스
 

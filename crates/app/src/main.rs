@@ -2,6 +2,7 @@
 
 mod app;
 mod audio;
+mod video;
 
 use eframe::egui;
 

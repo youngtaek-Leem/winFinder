@@ -22,3 +22,10 @@ rodio = "0.20"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 trash = "5"
 open.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+] }

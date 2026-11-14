@@ -65,7 +65,7 @@ pub fn list_dir(path: &Path) -> io::Result<Vec<Entry>> {
             if code == 2 || code == 3 {
                 return Ok(Vec::new());
             }
-            return Err(io::Error::new(io::ErrorKind::Other, err.to_string()));
+            return Err(io::Error::other(err.to_string()));
         }
     };
 
@@ -110,7 +110,7 @@ pub fn list_dir(path: &Path) -> io::Result<Vec<Entry>> {
                     unsafe {
                         let _ = FindClose(handle);
                     }
-                    return Err(io::Error::new(io::ErrorKind::Other, err.to_string()));
+                    return Err(io::Error::other(err.to_string()));
                 }
             }
         }

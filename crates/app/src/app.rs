@@ -1,4 +1,5 @@
 use crate::audio::AudioPlayer;
+use crate::video::VideoPlayer;
 use eframe::egui::{
     self, Align, Align2, Color32, FontData, FontDefinitions, FontFamily, FontId, Id, Key, Layout,
     Modifiers, Rect, RichText, Sense, Stroke, StrokeKind, TextureHandle, TextureOptions, Ui,
@@ -56,6 +57,8 @@ struct PreviewState {
     content: Option<Preview>,
     texture: Option<TextureHandle>,
     audio: Option<AudioPlayer>,
+    video: Option<VideoPlayer>,
+    video_error: Option<String>,
 }
 
 enum Dialog {
@@ -263,6 +266,8 @@ impl WinFinderApp {
         self.preview.texture = None;
         self.preview.path = None;
         self.preview.audio = None;
+        self.preview.video = None;
+        self.preview.video_error = None;
     }
 
     fn refresh_preview(&mut self, ctx: &egui::Context) {
@@ -316,10 +321,25 @@ impl WinFinderApp {
             None
         };
 
+        self.preview.video = None;
+        self.preview.video_error = None;
+        let video = if matches!(preview, Preview::Video { .. }) {
+            match VideoPlayer::open(&path) {
+                Ok(player) => Some(player),
+                Err(error) => {
+                    self.preview.video_error = Some(error);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         self.preview.path = Some(path);
         self.preview.content = Some(preview);
         self.preview.texture = texture;
         self.preview.audio = audio;
+        self.preview.video = video;
     }
 
     fn after_selection_changed(&mut self, ctx: &egui::Context) {
@@ -1033,8 +1053,29 @@ impl WinFinderApp {
                     content,
                     texture,
                     audio,
+                    video,
+                    video_error,
                     ..
                 } = &mut self.preview;
+
+                let runtime_error = video.as_ref().and_then(|player| player.error());
+                if let Some(player) = video.as_ref()
+                    && let Some(frame) = player.take_frame()
+                {
+                    let image = egui::ColorImage::from_rgba_unmultiplied(
+                        [frame.width as usize, frame.height as usize],
+                        &frame.rgba,
+                    );
+                    if let Some(texture) = texture {
+                        texture.set(image, TextureOptions::LINEAR);
+                    } else {
+                        *texture = Some(ui.ctx().load_texture(
+                            "preview:video",
+                            image,
+                            TextureOptions::LINEAR,
+                        ));
+                    }
+                }
 
                 if let Some(path) = &path {
                     ui.label(
@@ -1121,12 +1162,49 @@ impl WinFinderApp {
                     }
                     Some(Preview::Video { info }) => {
                         ui.label(info);
-                        ui.add_space(8.0);
-                        if let Some(path) = &path
-                            && ui.button("기본 앱으로 열기").clicked()
-                        {
-                            let _ = open::that(path);
+                        if let Some(error) = video_error.as_ref().or(runtime_error.as_ref()) {
+                            ui.colored_label(Color32::from_rgb(240, 110, 110), error);
                         }
+                        if let Some(texture) = texture {
+                            let available = ui.available_size();
+                            let width = texture.size()[0] as f32;
+                            let height = texture.size()[1] as f32;
+                            let scale = (available.x / width).min(available.y / height).min(1.0);
+                            ui.add(
+                                egui::Image::from_texture(&*texture)
+                                    .max_size(vec2(width * scale, height * scale))
+                                    .maintain_aspect_ratio(true),
+                            );
+                        } else if let Some(player) = video.as_ref()
+                            && !player.is_finished()
+                        {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label("동영상을 준비하는 중입니다");
+                            });
+                        }
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if let Some(player) = video {
+                                if player.is_finished() {
+                                    ui.label("재생 완료");
+                                } else if ui
+                                    .button(if player.is_paused() {
+                                        "재생"
+                                    } else {
+                                        "일시정지"
+                                    })
+                                    .clicked()
+                                {
+                                    player.toggle();
+                                }
+                            }
+                            if let Some(path) = &path
+                                && ui.button("기본 앱으로 열기").clicked()
+                            {
+                                let _ = open::that(path);
+                            }
+                        });
                     }
                     Some(Preview::Info { kind, info }) => {
                         ui.label(RichText::new(kind).strong());
@@ -1144,6 +1222,12 @@ impl WinFinderApp {
         self.preview.open = open;
         if !open {
             self.preview.audio = None;
+            self.preview.video = None;
+        } else if let Some(player) = self.preview.video.as_ref()
+            && !player.is_finished()
+            && !player.is_paused()
+        {
+            ctx.request_repaint_after(Duration::from_millis(16));
         }
     }
 
