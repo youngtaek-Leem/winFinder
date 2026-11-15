@@ -13,12 +13,19 @@ winfinder-core = { path = "../core" }
 winfinder-preview = { path = "../preview" }
 eframe = { version = "0.37", default-features = false, features = [
     "glow",
+    "wgpu",
     "default_fonts",
     "clipboard",
     "links",
 ] }
 egui_commonmark = "0.26"
-rodio = "0.20"
+rodio = { version = "0.23", default-features = false, features = [
+    "playback",
+    "flac",
+    "mp3",
+    "vorbis",
+    "wav",
+] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 trash = "5"
 open.workspace = true

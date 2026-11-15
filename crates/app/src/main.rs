@@ -37,6 +37,7 @@ fn run() -> eframe::Result {
 
     let options = eframe::NativeOptions {
         viewport,
+        renderer: select_renderer(),
         centered: session.window.position.is_none(),
         ..Default::default()
     };
@@ -46,6 +47,15 @@ fn run() -> eframe::Result {
         options,
         Box::new(move |cc| Ok(Box::new(app::WinFinderApp::new(cc, session)))),
     )
+}
+
+fn select_renderer() -> eframe::Renderer {
+    match std::env::var("WINFINDER_RENDERER").as_deref() {
+        Ok("glow") => eframe::Renderer::Glow,
+        Ok("wgpu") => eframe::Renderer::Wgpu,
+        _ if cfg!(windows) => eframe::Renderer::Wgpu,
+        _ => eframe::Renderer::Glow,
+    }
 }
 
 fn install_panic_hook() {

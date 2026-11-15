@@ -83,7 +83,12 @@ cargo xwin build -p winfinder-app --release --target x86_64-pc-windows-msvc
 - Windows SmartScreen이 표시되면 **추가 정보 → 실행** 을 선택하세요.
 - v0.1.2부터 Visual C++ 재배포 패키지가 필요 없도록 정적 CRT로 빌드합니다.
 - 실행 중 오류 창이 표시되면 `%APPDATA%\winFinder\startup-error.log` 또는 `crash.log` 내용을 확인해 주세요.
-- 이 앱은 OpenGL 3.2 이상이 필요합니다. 원격 데스크톱이나 가상 머신에서는 GPU 가속/드라이버를 확인하세요.
+- v0.1.3부터 Windows에서는 OpenGL 대신 **WGPU(DirectX 12)** 렌더러를 기본으로 사용합니다. DirectX 12 하드웨어 가속이 없으면 Windows의 WARP 소프트웨어 렌더러로 실행됩니다.
+- UTM 같은 가상 머신에서 화면이 표시되지 않으면 게스트의 DirectX/GPU 드라이버(UTM의 실험적 DirectX 지원 등)를 확인하세요.
+- 렌더러를 강제로 바꾸려면 실행 전에 환경 변수를 지정합니다.
+  - PowerShell: `$env:WINFINDER_RENDERER="glow"; .\winFinder.exe` (또는 `"wgpu"`)
+  - 명령 프롬프트: `set WINFINDER_RENDERER=glow` 후 `winFinder.exe`
+  - macOS 개발 빌드는 기본이 OpenGL(`glow`)이며, `WINFINDER_RENDERER=wgpu`로 WGPU를 사용할 수 있습니다.
 
 ## 라이선스
 

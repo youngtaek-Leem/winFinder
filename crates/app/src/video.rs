@@ -1,7 +1,8 @@
 #[cfg(windows)]
 mod imp {
     use rodio::buffer::SamplesBuffer;
-    use rodio::{OutputStream, Sink};
+    use rodio::{DeviceSinkBuilder, Player};
+    use std::num::{NonZeroU16, NonZeroU32};
     use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -157,10 +158,16 @@ mod imp {
             let mut stream = None;
             let mut sink = None;
             if let Some((sample_rate, channels, pcm)) = audio
-                && let Ok((output, handle)) = OutputStream::try_default()
-                && let Ok(player) = Sink::try_new(&handle)
+                && let (Some(channels), Some(sample_rate)) =
+                    (NonZeroU16::new(channels), NonZeroU32::new(sample_rate))
+                && let Ok(output) = DeviceSinkBuilder::open_default_sink()
             {
-                player.append(SamplesBuffer::new(channels, sample_rate, pcm));
+                let player = Player::connect_new(output.mixer());
+                let samples = pcm
+                    .into_iter()
+                    .map(|sample| f32::from(sample) / 32768.0)
+                    .collect::<Vec<_>>();
+                player.append(SamplesBuffer::new(channels, sample_rate, samples));
                 player.pause();
                 sink = Some(player);
                 stream = Some(output);
@@ -183,7 +190,7 @@ mod imp {
         shared: &Shared,
         stop: &AtomicBool,
         paused: &AtomicBool,
-        sink: Option<&Sink>,
+        sink: Option<&Player>,
     ) -> Result<(), String> {
         unsafe {
             let reader = open_reader(path)?;
