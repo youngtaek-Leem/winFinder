@@ -15,12 +15,17 @@ use winfinder_preview::{Preview, format_size};
 
 const ROW_HEIGHT: f32 = 24.0;
 const HEADER_HEIGHT: f32 = 22.0;
+const PANE_GAP: f32 = 6.0;
+const MIN_PANE_WIDTH: f32 = 220.0;
+const MIN_PANE_HEIGHT: f32 = 140.0;
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 const STATUS_TTL: Duration = Duration::from_secs(4);
 
 pub struct WinFinderApp {
     panes: Vec<Pane>,
     preset: LayoutPreset,
+    split_x: f32,
+    split_y: f32,
     active_pane: usize,
     preview: PreviewState,
     cm_cache: egui_commonmark::CommonMarkCache,
@@ -47,6 +52,7 @@ struct Tab {
     query: String,
     scroll: f32,
     viewport_height: f32,
+    row_pitch: f32,
     loaded: bool,
     error: Option<String>,
 }
@@ -97,6 +103,7 @@ impl Tab {
             query: String::new(),
             scroll: state.scroll,
             viewport_height: 0.0,
+            row_pitch: 0.0,
             loaded: false,
             error: None,
         }
@@ -222,6 +229,8 @@ impl WinFinderApp {
         Self {
             panes,
             preset: session.preset,
+            split_x: session.split_x,
+            split_y: session.split_y,
             active_pane: session.active_pane,
             preview: PreviewState::default(),
             cm_cache: egui_commonmark::CommonMarkCache::default(),
@@ -517,7 +526,12 @@ impl WinFinderApp {
             };
             let entry = &tab.entries[tab.view[next]];
             tab.selected = Some(entry.path.clone());
-            tab.scroll = scroll_to_show_row(next, tab.scroll, tab.viewport_height);
+            tab.scroll = scroll_to_show_row(
+                next,
+                tab.scroll,
+                tab.viewport_height,
+                tab.row_pitch.max(ROW_HEIGHT),
+            );
             true
         };
         if changed {
@@ -969,18 +983,59 @@ impl WinFinderApp {
         let rect = ui.max_rect();
         let cols = self.preset.columns();
         let rows = self.preset.rows();
-        let gap = 6.0;
-        let cell_width = ((rect.width() - gap * (cols as f32 - 1.0)) / cols as f32).max(1.0);
-        let cell_height = ((rect.height() - gap * (rows as f32 - 1.0)) / rows as f32).max(1.0);
+        let (column_rects, x_handle) =
+            split_axis(rect, cols, PANE_GAP, self.split_x, MIN_PANE_WIDTH, true);
+        let (row_rects, y_handle) =
+            split_axis(rect, rows, PANE_GAP, self.split_y, MIN_PANE_HEIGHT, false);
+        let mut split_changed = false;
+
+        if let Some(handle_rect) = x_handle {
+            let response = ui.interact(
+                handle_rect,
+                ui.make_persistent_id("winfinder-split-x"),
+                Sense::drag(),
+            );
+            if update_split_ratio(
+                &mut self.split_x,
+                &response,
+                rect,
+                PANE_GAP,
+                MIN_PANE_WIDTH,
+                true,
+            ) {
+                split_changed = true;
+            }
+            paint_split_handle(ui, &response, true);
+        }
+        if let Some(handle_rect) = y_handle {
+            let response = ui.interact(
+                handle_rect,
+                ui.make_persistent_id("winfinder-split-y"),
+                Sense::drag(),
+            );
+            if update_split_ratio(
+                &mut self.split_y,
+                &response,
+                rect,
+                PANE_GAP,
+                MIN_PANE_HEIGHT,
+                false,
+            ) {
+                split_changed = true;
+            }
+            paint_split_handle(ui, &response, false);
+        }
+        if split_changed {
+            self.dirty = true;
+        }
 
         for index in 0..self.preset.pane_count() {
             let col = index % cols;
             let row = index / cols;
-            let min = pos2(
-                rect.left() + col as f32 * (cell_width + gap),
-                rect.top() + row as f32 * (cell_height + gap),
+            let cell = Rect::from_min_max(
+                pos2(column_rects[col].left(), row_rects[row].top()),
+                pos2(column_rects[col].right(), row_rects[row].bottom()),
             );
-            let cell = Rect::from_min_size(min, vec2(cell_width, cell_height));
             let active = index == self.active_pane;
             let fill = if active {
                 Color32::from_rgb(29, 31, 35)
@@ -1238,6 +1293,8 @@ impl WinFinderApp {
             version: winfinder_core::state::STATE_VERSION,
             window: self.window_state.clone(),
             preset: self.preset,
+            split_x: self.split_x,
+            split_y: self.split_y,
             active_pane: self.active_pane,
             panes: Vec::new(),
         };
@@ -1329,10 +1386,10 @@ impl eframe::App for WinFinderApp {
     }
 }
 
-fn scroll_to_show_row(index: usize, scroll: f32, viewport_height: f32) -> f32 {
-    let row_top = index as f32 * ROW_HEIGHT;
-    let row_bottom = row_top + ROW_HEIGHT;
-    let viewport_height = viewport_height.max(ROW_HEIGHT);
+fn scroll_to_show_row(index: usize, scroll: f32, viewport_height: f32, row_pitch: f32) -> f32 {
+    let row_top = index as f32 * row_pitch;
+    let row_bottom = row_top + row_pitch;
+    let viewport_height = viewport_height.max(row_pitch);
 
     if row_top < scroll {
         row_top
@@ -1341,6 +1398,104 @@ fn scroll_to_show_row(index: usize, scroll: f32, viewport_height: f32) -> f32 {
     } else {
         scroll
     }
+}
+
+fn split_axis(
+    rect: Rect,
+    count: usize,
+    gap: f32,
+    ratio: f32,
+    min_extent: f32,
+    horizontal: bool,
+) -> (Vec<Rect>, Option<Rect>) {
+    if count < 2 {
+        return (vec![rect], None);
+    }
+
+    let extent = if horizontal {
+        rect.width()
+    } else {
+        rect.height()
+    };
+    let available = (extent - gap).max(1.0);
+    let min_ratio = (min_extent / available).clamp(0.0, 0.45);
+    let ratio = ratio.clamp(min_ratio, 1.0 - min_ratio);
+    let first_extent = available * ratio;
+
+    let (first, second, handle) = if horizontal {
+        let split = rect.left() + first_extent;
+        (
+            Rect::from_min_max(rect.min, pos2(split, rect.bottom())),
+            Rect::from_min_max(pos2(split + gap, rect.top()), rect.max),
+            Rect::from_min_max(pos2(split, rect.top()), pos2(split + gap, rect.bottom())),
+        )
+    } else {
+        let split = rect.top() + first_extent;
+        (
+            Rect::from_min_max(rect.min, pos2(rect.right(), split)),
+            Rect::from_min_max(pos2(rect.left(), split + gap), rect.max),
+            Rect::from_min_max(pos2(rect.left(), split), pos2(rect.right(), split + gap)),
+        )
+    };
+
+    (vec![first, second], Some(handle))
+}
+
+fn update_split_ratio(
+    ratio: &mut f32,
+    response: &egui::Response,
+    rect: Rect,
+    gap: f32,
+    min_extent: f32,
+    horizontal: bool,
+) -> bool {
+    if response.dragged()
+        && let Some(pointer) = response.interact_pointer_pos()
+    {
+        let extent = if horizontal {
+            rect.width()
+        } else {
+            rect.height()
+        };
+        let available = (extent - gap).max(1.0);
+        let min_ratio = (min_extent / available).clamp(0.0, 0.45);
+        let offset = if horizontal {
+            pointer.x - rect.left()
+        } else {
+            pointer.y - rect.top()
+        };
+        *ratio = (offset / available).clamp(min_ratio, 1.0 - min_ratio);
+        true
+    } else {
+        false
+    }
+}
+
+fn paint_split_handle(ui: &Ui, response: &egui::Response, horizontal: bool) {
+    if response.hovered() || response.dragged() {
+        ui.ctx().set_cursor_icon(if horizontal {
+            egui::CursorIcon::ResizeHorizontal
+        } else {
+            egui::CursorIcon::ResizeVertical
+        });
+    }
+
+    let color = if response.dragged() {
+        Color32::from_rgb(80, 140, 230)
+    } else if response.hovered() {
+        Color32::from_gray(120)
+    } else {
+        Color32::from_gray(43)
+    };
+    let line = Rect::from_center_size(
+        response.rect.center(),
+        if horizontal {
+            vec2(2.0, response.rect.height())
+        } else {
+            vec2(response.rect.width(), 2.0)
+        },
+    );
+    ui.painter().rect_filled(line, 1.0, color);
 }
 
 fn pane_contents(ui: &mut Ui, pane: &mut Pane, pane_index: usize) -> Vec<Action> {
@@ -1486,6 +1641,7 @@ fn pane_contents(ui: &mut Ui, pane: &mut Pane, pane_index: usize) -> Vec<Action>
 
     draw_header(ui);
 
+    tab.row_pitch = ROW_HEIGHT + ui.spacing().item_spacing.y;
     let selected = tab.selected.clone();
     let mut action = None;
     let view_len = tab.view.len();
@@ -1741,13 +1897,28 @@ mod tests {
 
     #[test]
     fn keyboard_selection_scrolls_only_at_view_edges() {
-        let viewport = ROW_HEIGHT * 10.0;
+        let row_pitch = ROW_HEIGHT + 4.0;
+        let viewport = row_pitch * 10.0;
 
-        assert_eq!(scroll_to_show_row(4, 0.0, viewport), 0.0);
-        assert_eq!(scroll_to_show_row(9, 0.0, viewport), 0.0);
-        assert_eq!(scroll_to_show_row(10, 0.0, viewport), ROW_HEIGHT);
-        assert_eq!(scroll_to_show_row(9, 5.0, viewport), 5.0);
-        assert_eq!(scroll_to_show_row(20, 5.0, viewport), ROW_HEIGHT * 11.0);
-        assert_eq!(scroll_to_show_row(0, 5.0, viewport), 0.0);
+        assert_eq!(scroll_to_show_row(4, 0.0, viewport, row_pitch), 0.0);
+        assert_eq!(scroll_to_show_row(9, 0.0, viewport, row_pitch), 0.0);
+        assert_eq!(scroll_to_show_row(10, 0.0, viewport, row_pitch), row_pitch);
+        assert_eq!(scroll_to_show_row(9, 5.0, viewport, row_pitch), 5.0);
+        assert_eq!(
+            scroll_to_show_row(20, 5.0, viewport, row_pitch),
+            row_pitch * 11.0
+        );
+        assert_eq!(scroll_to_show_row(0, 5.0, viewport, row_pitch), 0.0);
+    }
+
+    #[test]
+    fn split_axis_clamps_to_minimum_pane_size() {
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 800.0));
+        let (columns, handle) = split_axis(rect, 2, PANE_GAP, 0.0, MIN_PANE_WIDTH, true);
+        assert_eq!(columns[0].width(), MIN_PANE_WIDTH);
+        assert_eq!(handle.unwrap().width(), PANE_GAP);
+
+        let (rows, _) = split_axis(rect, 2, PANE_GAP, 1.0, MIN_PANE_HEIGHT, false);
+        assert_eq!(rows[1].height(), MIN_PANE_HEIGHT);
     }
 }

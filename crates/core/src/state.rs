@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub const STATE_VERSION: u32 = 1;
+pub const STATE_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
@@ -14,6 +14,10 @@ pub struct Session {
     pub window: WindowState,
     #[serde(default)]
     pub preset: LayoutPreset,
+    #[serde(default = "default_split")]
+    pub split_x: f32,
+    #[serde(default = "default_split")]
+    pub split_y: f32,
     #[serde(default)]
     pub active_pane: usize,
     #[serde(default)]
@@ -52,6 +56,10 @@ pub struct TabState {
     pub scroll: f32,
 }
 
+fn default_split() -> f32 {
+    0.5
+}
+
 impl Default for WindowState {
     fn default() -> Self {
         Self {
@@ -69,7 +77,7 @@ impl Default for TabState {
             history: History::new(default_dir()),
             sort: SortKey::Name,
             sort_desc: false,
-            show_hidden: false,
+            show_hidden: true,
             selected: None,
             scroll: 0.0,
         }
@@ -91,6 +99,8 @@ impl Default for Session {
             version: STATE_VERSION,
             window: WindowState::default(),
             preset: LayoutPreset::OneByTwo,
+            split_x: default_split(),
+            split_y: default_split(),
             active_pane: 0,
             panes: (0..MAX_PANES).map(|_| PaneState::default()).collect(),
         }
@@ -99,6 +109,10 @@ impl Default for Session {
 
 impl Session {
     pub fn normalize(&mut self) {
+        let previous_version = self.version;
+        self.split_x = self.split_x.clamp(0.1, 0.9);
+        self.split_y = self.split_y.clamp(0.1, 0.9);
+
         if self.panes.is_empty() {
             self.panes = (0..MAX_PANES).map(|_| PaneState::default()).collect();
         }
@@ -125,6 +139,13 @@ impl Session {
         }
         if self.window.width < 480.0 || self.window.height < 320.0 {
             self.window = WindowState::default();
+        }
+        if previous_version < 2 {
+            for pane in &mut self.panes {
+                for tab in &mut pane.tabs {
+                    tab.show_hidden = true;
+                }
+            }
         }
         self.version = STATE_VERSION;
     }
@@ -201,5 +222,35 @@ mod tests {
         let json = serde_json::to_vec(&session).unwrap();
         let decoded: Session = serde_json::from_slice(&json).unwrap();
         assert_eq!(decoded.panes.len(), MAX_PANES);
+        assert_eq!(decoded.split_x, 0.5);
+        assert_eq!(decoded.split_y, 0.5);
+    }
+
+    #[test]
+    fn migration_shows_hidden_entries_and_clamps_splits() {
+        let mut session = Session {
+            version: 1,
+            split_x: 0.0,
+            split_y: 2.0,
+            ..Session::default()
+        };
+        for pane in &mut session.panes {
+            for tab in &mut pane.tabs {
+                tab.show_hidden = false;
+            }
+        }
+
+        session.normalize();
+
+        assert_eq!(session.version, STATE_VERSION);
+        assert_eq!(session.split_x, 0.1);
+        assert_eq!(session.split_y, 0.9);
+        assert!(
+            session
+                .panes
+                .iter()
+                .flat_map(|pane| &pane.tabs)
+                .all(|tab| tab.show_hidden)
+        );
     }
 }
