@@ -5,13 +5,15 @@ use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub const STATE_VERSION: u32 = 2;
+pub const STATE_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
     pub version: u32,
     #[serde(default)]
     pub window: WindowState,
+    #[serde(default)]
+    pub theme: Theme,
     #[serde(default)]
     pub preset: LayoutPreset,
     #[serde(default = "default_split")]
@@ -22,6 +24,13 @@ pub struct Session {
     pub active_pane: usize,
     #[serde(default)]
     pub panes: Vec<PaneState>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Theme {
+    #[default]
+    Light,
+    Dark,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -98,6 +107,7 @@ impl Default for Session {
         Self {
             version: STATE_VERSION,
             window: WindowState::default(),
+            theme: Theme::default(),
             preset: LayoutPreset::OneByTwo,
             split_x: default_split(),
             split_y: default_split(),
@@ -224,6 +234,22 @@ mod tests {
         assert_eq!(decoded.panes.len(), MAX_PANES);
         assert_eq!(decoded.split_x, 0.5);
         assert_eq!(decoded.split_y, 0.5);
+        assert_eq!(decoded.theme, Theme::Light);
+    }
+
+    #[test]
+    fn missing_theme_defaults_to_light() {
+        let json = serde_json::json!({
+            "version": 2,
+            "window": WindowState::default(),
+            "preset": LayoutPreset::OneByTwo,
+            "split_x": 0.5,
+            "split_y": 0.5,
+            "active_pane": 0,
+            "panes": []
+        });
+        let decoded: Session = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.theme, Theme::Light);
     }
 
     #[test]

@@ -8,4 +8,4 @@ pub use entry::{Entry, SortKey, sort_entries};
 pub use fs::{list_dir, quick_access, roots};
 pub use layout::{LayoutPreset, MAX_PANES, MAX_TABS_PER_PANE};
 pub use nav::History;
-pub use state::{PaneState, Session, TabState, WindowState};
+pub use state::{PaneState, Session, TabState, Theme, WindowState};

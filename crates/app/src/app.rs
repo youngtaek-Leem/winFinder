@@ -2,14 +2,15 @@ use crate::audio::AudioPlayer;
 use crate::video::VideoPlayer;
 use eframe::egui::{
     self, Align, Align2, Color32, FontData, FontDefinitions, FontFamily, FontId, Id, Key, Layout,
-    Modifiers, Rect, RichText, Sense, Stroke, StrokeKind, TextureHandle, TextureOptions, Ui,
-    UiBuilder, pos2, vec2,
+    Modifiers, Painter, Rect, Response, RichText, Sense, Stroke, StrokeKind, TextureHandle,
+    TextureOptions, Ui, UiBuilder, pos2, vec2,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use winfinder_core::{
-    Entry, History, LayoutPreset, SortKey, TabState, list_dir, quick_access, roots, sort_entries,
+    Entry, History, LayoutPreset, SortKey, TabState, Theme, list_dir, quick_access, roots,
+    sort_entries,
 };
 use winfinder_preview::{Preview, format_size};
 
@@ -33,6 +34,7 @@ pub struct WinFinderApp {
     dirty: bool,
     last_save: Instant,
     window_state: winfinder_core::WindowState,
+    theme: Theme,
     dialog: Option<Dialog>,
 }
 
@@ -77,7 +79,6 @@ enum Dialog {
 enum Action {
     Select(PathBuf),
     Open(PathBuf),
-    Navigate(PathBuf),
     Back,
     Forward,
     Up,
@@ -88,6 +89,12 @@ enum Action {
     SetSortDesc(bool),
     SetHidden(bool),
     SetQuery(String),
+    Refresh,
+    NewFolder(PathBuf),
+    Rename(PathBuf),
+    Delete(PathBuf),
+    Preview(PathBuf),
+    CopyPath(PathBuf),
 }
 
 impl Tab {
@@ -210,9 +217,8 @@ impl Pane {
 impl WinFinderApp {
     pub fn new(cc: &eframe::CreationContext<'_>, mut session: winfinder_core::Session) -> Self {
         install_fonts(&cc.egui_ctx);
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
-
         session.normalize();
+        apply_theme(&cc.egui_ctx, session.theme);
         let mut panes = Vec::new();
         for pane_state in session.panes {
             let mut tabs: Vec<Tab> = pane_state.tabs.into_iter().map(Tab::from_state).collect();
@@ -238,6 +244,7 @@ impl WinFinderApp {
             dirty: false,
             last_save: Instant::now(),
             window_state: session.window,
+            theme: session.theme,
             dialog: None,
         }
     }
@@ -254,11 +261,24 @@ impl WinFinderApp {
             .clone()
     }
 
+    fn toggle_theme(&mut self, ctx: &egui::Context) {
+        self.theme = match self.theme {
+            Theme::Light => Theme::Dark,
+            Theme::Dark => Theme::Light,
+        };
+        apply_theme(ctx, self.theme);
+        self.dirty = true;
+    }
+
     fn toggle_preview(&mut self, ctx: &egui::Context) {
         if self.preview.open {
             self.close_preview();
             return;
         }
+        self.show_preview(ctx);
+    }
+
+    fn show_preview(&mut self, ctx: &egui::Context) {
         let Some(path) = self.selected_path() else {
             self.set_status("미리보기할 파일을 선택하세요");
             return;
@@ -547,11 +567,27 @@ impl WinFinderApp {
         self.open_path(ctx, self.active_pane, path);
     }
 
-    fn reload_active(&mut self) {
-        if let Some(pane) = self.panes.get_mut(self.active_pane) {
+    fn enter_selected_dir(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.selected_path() else {
+            self.set_status("이동할 폴더를 선택하세요");
+            return;
+        };
+        if path.is_dir() {
+            self.navigate(ctx, self.active_pane, path);
+        } else {
+            self.set_status("폴더를 선택하세요");
+        }
+    }
+
+    fn reload_pane(&mut self, pane_idx: usize) {
+        if let Some(pane) = self.panes.get_mut(pane_idx) {
             pane.active_tab_mut().load_current();
         }
         self.dirty = true;
+    }
+
+    fn reload_active(&mut self) {
+        self.reload_pane(self.active_pane);
     }
 
     fn start_rename(&mut self) {
@@ -559,6 +595,10 @@ impl WinFinderApp {
             self.set_status("이름을 변경할 항목을 선택하세요");
             return;
         };
+        self.start_rename_path(path);
+    }
+
+    fn start_rename_path(&mut self, path: PathBuf) {
         let name = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -574,6 +614,10 @@ impl WinFinderApp {
         else {
             return;
         };
+        self.start_new_folder_at(parent);
+    }
+
+    fn start_new_folder_at(&mut self, parent: PathBuf) {
         self.dialog = Some(Dialog::NewFolder {
             parent,
             name: "새 폴더".to_string(),
@@ -585,6 +629,10 @@ impl WinFinderApp {
             self.set_status("삭제할 항목을 선택하세요");
             return;
         };
+        self.start_delete_path(path);
+    }
+
+    fn start_delete_path(&mut self, path: PathBuf) {
         self.dialog = Some(Dialog::Delete { path });
     }
 
@@ -733,8 +781,11 @@ impl WinFinderApp {
         let mut space = false;
         let mut up = false;
         let mut down = false;
-        let mut enter = false;
-        let mut backspace = false;
+        let mut rename = false;
+        let mut rename_f2 = false;
+        let mut parent = false;
+        let mut enter_dir = false;
+        let mut open = false;
         let mut escape = false;
         let mut back = false;
         let mut forward = false;
@@ -742,7 +793,6 @@ impl WinFinderApp {
         let mut close_tab = false;
         let mut next_tab = false;
         let mut prev_tab = false;
-        let mut rename = false;
         let mut delete = false;
         let mut new_folder = false;
         let mut pane_shortcut: Option<usize> = None;
@@ -751,8 +801,11 @@ impl WinFinderApp {
             space = input.consume_key(Modifiers::NONE, Key::Space);
             up = input.consume_key(Modifiers::NONE, Key::ArrowUp);
             down = input.consume_key(Modifiers::NONE, Key::ArrowDown);
-            enter = input.consume_key(Modifiers::NONE, Key::Enter);
-            backspace = input.consume_key(Modifiers::NONE, Key::Backspace);
+            rename = input.consume_key(Modifiers::NONE, Key::Enter);
+            rename_f2 = input.consume_key(Modifiers::NONE, Key::F2);
+            parent = input.consume_key(Modifiers::COMMAND, Key::ArrowUp);
+            enter_dir = input.consume_key(Modifiers::COMMAND, Key::ArrowDown);
+            open = input.consume_key(Modifiers::COMMAND, Key::O);
             escape = input.consume_key(Modifiers::NONE, Key::Escape);
             back = input.consume_key(Modifiers::COMMAND, Key::ArrowLeft);
             forward = input.consume_key(Modifiers::COMMAND, Key::ArrowRight);
@@ -760,7 +813,6 @@ impl WinFinderApp {
             close_tab = input.consume_key(Modifiers::COMMAND, Key::W);
             next_tab = input.consume_key(Modifiers::COMMAND, Key::Tab);
             prev_tab = input.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Tab);
-            rename = input.consume_key(Modifiers::NONE, Key::F2);
             delete = input.consume_key(Modifiers::NONE, Key::Delete);
             new_folder = input.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::N);
             for (key, index) in [
@@ -787,11 +839,17 @@ impl WinFinderApp {
         if down {
             self.move_selection(ctx, 1);
         }
-        if enter {
-            self.open_selected(ctx);
+        if rename || rename_f2 {
+            self.start_rename();
         }
-        if backspace {
+        if parent {
             self.go_up(ctx, self.active_pane);
+        }
+        if enter_dir {
+            self.enter_selected_dir(ctx);
+        }
+        if open {
+            self.open_selected(ctx);
         }
         if back {
             self.go_back(self.active_pane);
@@ -804,9 +862,6 @@ impl WinFinderApp {
         }
         if new_folder {
             self.start_new_folder();
-        }
-        if rename {
-            self.start_rename();
         }
         if delete {
             self.start_delete();
@@ -842,7 +897,6 @@ impl WinFinderApp {
                 self.after_selection_changed(ctx);
             }
             Action::Open(path) => self.open_path(ctx, pane_idx, path),
-            Action::Navigate(path) => self.navigate(ctx, pane_idx, path),
             Action::Back => self.go_back(pane_idx),
             Action::Forward => self.go_forward(pane_idx),
             Action::Up => self.go_up(ctx, pane_idx),
@@ -880,43 +934,81 @@ impl WinFinderApp {
                     tab.rebuild_view();
                 }
             }
+            Action::Refresh => {
+                self.reload_pane(pane_idx);
+                self.set_status("새로 고침했습니다");
+            }
+            Action::NewFolder(parent) => {
+                self.active_pane = pane_idx;
+                self.start_new_folder_at(parent);
+            }
+            Action::Rename(path) => {
+                self.active_pane = pane_idx;
+                self.start_rename_path(path);
+            }
+            Action::Delete(path) => {
+                self.active_pane = pane_idx;
+                self.start_delete_path(path);
+            }
+            Action::Preview(path) => {
+                self.active_pane = pane_idx;
+                if let Some(pane) = self.panes.get_mut(pane_idx) {
+                    pane.active_tab_mut().selected = Some(path);
+                }
+                self.dirty = true;
+                self.show_preview(ctx);
+            }
+            Action::CopyPath(path) => {
+                ctx.copy_text(path.display().to_string());
+                self.set_status("경로를 복사했습니다");
+            }
         }
     }
 
     fn top_bar(&mut self, ui: &mut Ui) {
+        ui.spacing_mut().item_spacing.x = 3.0;
         ui.horizontal(|ui| {
-            ui.label(RichText::new("winFinder").strong().size(16.0));
+            ui.label(RichText::new("winFinder").strong().size(15.0));
+            ui.add_space(3.0);
+            ui.separator();
+
+            if icon_button(ui, Icon::NewFolder, "새 폴더 (Ctrl/Cmd+Shift+N)", false).clicked() {
+                self.start_new_folder();
+            }
+            if icon_button(ui, Icon::Rename, "이름 변경 (Enter, F2)", false).clicked() {
+                self.start_rename();
+            }
+            if icon_button(ui, Icon::Delete, "삭제 (Delete)", false).clicked() {
+                self.start_delete();
+            }
+
             ui.separator();
             for preset in LayoutPreset::all() {
-                if ui
-                    .selectable_label(self.preset == preset, preset.label())
-                    .clicked()
-                {
+                let icon = match preset {
+                    LayoutPreset::One => Icon::LayoutOne,
+                    LayoutPreset::OneByTwo => Icon::LayoutTwo,
+                    LayoutPreset::TwoByTwo => Icon::LayoutFour,
+                };
+                if icon_button(ui, icon, preset.label(), self.preset == preset).clicked() {
                     self.preset = preset;
                     self.active_pane = self.active_pane.min(preset.pane_count() - 1);
                     self.dirty = true;
                 }
             }
+
             ui.separator();
-            if ui.button("미리보기 (Space)").clicked() {
+            if icon_button(ui, Icon::Preview, "미리보기 (Space)", self.preview.open).clicked() {
                 self.toggle_preview(ui.ctx());
             }
-            ui.separator();
-            if ui.button("새 폴더").clicked() {
-                self.start_new_folder();
-            }
-            if ui.button("이름 변경").clicked() {
-                self.start_rename();
-            }
-            if ui.button("삭제").clicked() {
-                self.start_delete();
-            }
+
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(
-                    RichText::new("↑↓ 이동 · Enter 열기 · Backspace 상위 · Ctrl+T/W 탭")
-                        .color(Color32::from_gray(140))
-                        .size(11.0),
-                );
+                let (icon, tooltip) = match self.theme {
+                    Theme::Light => (Icon::Moon, "다크 테마로 전환"),
+                    Theme::Dark => (Icon::Sun, "라이트 테마로 전환"),
+                };
+                if icon_button(ui, icon, tooltip, false).clicked() {
+                    self.toggle_theme(ui.ctx());
+                }
             });
         });
     }
@@ -943,10 +1035,11 @@ impl WinFinderApp {
     }
 
     fn status_bar(&mut self, ui: &mut Ui) {
+        let palette = Palette::from_visuals(ui.visuals());
         ui.horizontal(|ui| {
             if let Some((message, at)) = &self.status {
                 if at.elapsed() < STATUS_TTL {
-                    ui.label(RichText::new(message).color(Color32::from_rgb(120, 190, 255)));
+                    ui.label(RichText::new(message).color(palette.accent));
                 } else {
                     ui.label("");
                 }
@@ -958,9 +1051,9 @@ impl WinFinderApp {
                     .current()
                     .map(|path| path.display().to_string())
                     .unwrap_or_default();
-                ui.label(RichText::new(path).color(Color32::from_gray(150)));
+                ui.label(RichText::new(path).color(palette.text_weak));
                 if let Some(error) = &tab.error {
-                    ui.colored_label(Color32::from_rgb(240, 110, 110), error);
+                    ui.colored_label(palette.danger, error);
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -972,7 +1065,7 @@ impl WinFinderApp {
                         self.panes[self.active_pane].active + 1,
                         tab_count(&self.panes[self.active_pane])
                     ))
-                    .color(Color32::from_gray(130))
+                    .color(palette.text_weak)
                     .size(11.0),
                 );
             });
@@ -1037,21 +1130,25 @@ impl WinFinderApp {
                 pos2(column_rects[col].right(), row_rects[row].bottom()),
             );
             let active = index == self.active_pane;
-            let fill = if active {
-                Color32::from_rgb(29, 31, 35)
-            } else {
-                Color32::from_rgb(23, 24, 27)
-            };
-            ui.painter().rect_filled(cell, 6.0, fill);
+            let palette = Palette::from_visuals(ui.visuals());
+            ui.painter().rect_filled(
+                cell,
+                6.0,
+                if active {
+                    palette.pane_active
+                } else {
+                    palette.pane_inactive
+                },
+            );
             ui.painter().rect_stroke(
                 cell,
                 6.0,
                 Stroke::new(
                     if active { 1.8 } else { 1.0 },
                     if active {
-                        Color32::from_rgb(80, 140, 230)
+                        palette.accent
                     } else {
-                        Color32::from_rgb(49, 51, 56)
+                        palette.pane_border
                     },
                 ),
                 StrokeKind::Inside,
@@ -1292,6 +1389,7 @@ impl WinFinderApp {
         let mut session = winfinder_core::Session {
             version: winfinder_core::state::STATE_VERSION,
             window: self.window_state.clone(),
+            theme: self.theme,
             preset: self.preset,
             split_x: self.split_x,
             split_y: self.split_y,
@@ -1480,12 +1578,13 @@ fn paint_split_handle(ui: &Ui, response: &egui::Response, horizontal: bool) {
         });
     }
 
+    let palette = Palette::from_visuals(ui.visuals());
     let color = if response.dragged() {
-        Color32::from_rgb(80, 140, 230)
+        palette.accent
     } else if response.hovered() {
-        Color32::from_gray(120)
+        palette.splitter_hover
     } else {
-        Color32::from_gray(43)
+        palette.splitter
     };
     let line = Rect::from_center_size(
         response.rect.center(),
@@ -1548,98 +1647,122 @@ fn pane_contents(ui: &mut Ui, pane: &mut Pane, pane_index: usize) -> Vec<Action>
     let can_back = pane.active_tab().history.can_back();
     let can_forward = pane.active_tab().history.can_forward();
     let active_index = pane.active;
+    let sort = pane.active_tab().sort;
+    let sort_desc = pane.active_tab().sort_desc;
+    let show_hidden = pane.active_tab().show_hidden;
+    let query = pane.active_tab().query.clone();
     let tab = pane.active_tab_mut();
+    let palette = Palette::from_visuals(ui.visuals());
 
+    ui.spacing_mut().item_spacing.x = 3.0;
     ui.horizontal(|ui| {
-        if ui
-            .add_enabled(can_back, egui::Button::new("←"))
-            .on_hover_text("뒤로 (Ctrl/Cmd+←)")
-            .clicked()
-        {
+        if icon_button_enabled(ui, can_back, Icon::Back, "뒤로 (Ctrl/Cmd+←)").clicked() {
             actions.push(Action::Back);
         }
-        if ui
-            .add_enabled(can_forward, egui::Button::new("→"))
-            .on_hover_text("앞으로 (Ctrl/Cmd+→)")
-            .clicked()
+        if icon_button_enabled(ui, can_forward, Icon::Forward, "앞으로 (Ctrl/Cmd+→)").clicked()
         {
             actions.push(Action::Forward);
         }
-        if ui
-            .button("↑")
-            .on_hover_text("상위 폴더 (Backspace)")
-            .clicked()
-        {
+        if icon_button(ui, Icon::Up, "상위 폴더 (Ctrl/Cmd+↑)", false).clicked() {
             actions.push(Action::Up);
         }
-
-        egui::ScrollArea::horizontal()
-            .id_salt(("breadcrumb", pane_index, active_index))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let mut accumulated = PathBuf::new();
-                    let components: Vec<_> = current_path.components().collect();
-                    for (index, component) in components.iter().enumerate() {
-                        accumulated.push(component.as_os_str());
-                        if index > 0 {
-                            ui.label(RichText::new("›").color(Color32::from_gray(110)));
-                        }
-                        let label = component.as_os_str().to_string_lossy();
-                        if ui.small_button(label.as_ref()).clicked() {
-                            actions.push(Action::Navigate(accumulated.clone()));
-                        }
-                    }
-                });
-            });
+        if icon_button(ui, Icon::Refresh, "새로 고침", false).clicked() {
+            actions.push(Action::Refresh);
+        }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let mut query = tab.query.clone();
-            if ui
-                .add(
-                    egui::TextEdit::singleline(&mut query)
-                        .hint_text("필터")
-                        .desired_width(100.0),
-                )
-                .changed()
-            {
-                actions.push(Action::SetQuery(query));
-            }
-            let mut show_hidden = tab.show_hidden;
-            if ui.checkbox(&mut show_hidden, "숨김").changed() {
-                actions.push(Action::SetHidden(show_hidden));
-            }
-            let mut sort = tab.sort;
-            egui::ComboBox::from_id_salt(("sort", pane_index, active_index))
-                .selected_text(sort_label(tab.sort))
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut sort, SortKey::Name, "이름");
-                    ui.selectable_value(&mut sort, SortKey::Size, "크기");
-                    ui.selectable_value(&mut sort, SortKey::Modified, "수정일");
-                    ui.selectable_value(&mut sort, SortKey::Type, "유형");
+            let response = icon_button(ui, Icon::ViewOptions, "보기 옵션", false);
+            egui::Popup::menu(&response)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .show(|ui| {
+                    view_options(ui, &mut actions, sort, sort_desc, show_hidden, &query);
                 });
-            if sort != tab.sort {
-                actions.push(Action::SetSort(sort));
-            }
-            let mut desc = tab.sort_desc;
-            if ui
-                .selectable_label(desc, if desc { "↓" } else { "↑" })
-                .on_hover_text("정렬 방향")
-                .clicked()
-            {
-                desc = !desc;
-                actions.push(Action::SetSortDesc(desc));
-            }
-            ui.label(
-                RichText::new(truncate_path(&current_path, 44)).color(Color32::from_gray(130)),
-            );
         });
     });
 
+    let path_text = current_path.display().to_string();
+    egui::Frame::new()
+        .fill(palette.path_bg)
+        .stroke(Stroke::new(1.0, palette.pane_border))
+        .corner_radius(4.0)
+        .inner_margin(egui::Margin::symmetric(6, 2))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let response = ui.add(
+                egui::Label::new(
+                    RichText::new(&path_text)
+                        .monospace()
+                        .size(11.0)
+                        .color(palette.text),
+                )
+                .wrap()
+                .selectable(true)
+                .sense(Sense::click()),
+            );
+            let response = response.on_hover_text("전체 경로 · 우클릭하여 복사");
+            let menu_path = current_path.clone();
+            response.context_menu(|ui| {
+                if ui.button("경로 복사").clicked() {
+                    actions.push(Action::CopyPath(menu_path.clone()));
+                    ui.close();
+                }
+            });
+        });
+
     if let Some(error) = &tab.error {
-        ui.colored_label(Color32::from_rgb(240, 110, 110), error);
+        ui.colored_label(palette.danger, error);
     }
 
-    draw_header(ui);
+    draw_header(ui, &palette);
+
+    let files_rect = ui.available_rect_before_wrap();
+    let background = ui.interact(
+        files_rect,
+        ui.make_persistent_id(("files-background", pane_index, active_index)),
+        Sense::click(),
+    );
+    let menu_path = current_path.clone();
+    egui::Popup::context_menu(&background)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_min_width(200.0);
+            if ui.button("새 폴더").clicked() {
+                actions.push(Action::NewFolder(menu_path.clone()));
+                ui.close();
+            }
+            if ui.button("새로 고침").clicked() {
+                actions.push(Action::Refresh);
+                ui.close();
+            }
+            ui.separator();
+            let mut hidden = show_hidden;
+            if ui.checkbox(&mut hidden, "숨김 항목 표시").changed() {
+                actions.push(Action::SetHidden(hidden));
+            }
+            ui.menu_button(format!("정렬: {}", sort_label(sort)), |ui| {
+                for (key, label) in [
+                    (SortKey::Name, "이름"),
+                    (SortKey::Size, "크기"),
+                    (SortKey::Modified, "수정일"),
+                    (SortKey::Type, "유형"),
+                ] {
+                    if ui.selectable_label(sort == key, label).clicked() {
+                        actions.push(Action::SetSort(key));
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                let mut desc = sort_desc;
+                if ui.checkbox(&mut desc, "내림차순").changed() {
+                    actions.push(Action::SetSortDesc(desc));
+                }
+            });
+            ui.separator();
+            if ui.button("경로 복사").clicked() {
+                actions.push(Action::CopyPath(menu_path.clone()));
+                ui.close();
+            }
+        });
 
     tab.row_pitch = ROW_HEIGHT + ui.spacing().item_spacing.y;
     let selected = tab.selected.clone();
@@ -1653,7 +1776,37 @@ fn pane_contents(ui: &mut Ui, pane: &mut Pane, pane_index: usize) -> Vec<Action>
             for row in range {
                 let entry = &tab.entries[tab.view[row]];
                 let is_selected = selected.as_deref() == Some(entry.path.as_path());
-                let response = draw_row(ui, entry, is_selected);
+                let response = draw_row(ui, entry, is_selected, &palette);
+                let path = entry.path.clone();
+                let is_dir = entry.is_dir;
+                if response.secondary_clicked() {
+                    action = Some(Action::Select(path.clone()));
+                }
+                response.context_menu(|ui| {
+                    ui.set_min_width(180.0);
+                    if ui.button("열기").clicked() {
+                        action = Some(Action::Open(path.clone()));
+                        ui.close();
+                    }
+                    if !is_dir && ui.button("미리보기").clicked() {
+                        action = Some(Action::Preview(path.clone()));
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("이름 변경").clicked() {
+                        action = Some(Action::Rename(path.clone()));
+                        ui.close();
+                    }
+                    if ui.button("삭제").clicked() {
+                        action = Some(Action::Delete(path.clone()));
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("경로 복사").clicked() {
+                        action = Some(Action::CopyPath(path.clone()));
+                        ui.close();
+                    }
+                });
                 if response.double_clicked() {
                     action = Some(Action::Open(entry.path.clone()));
                 } else if response.clicked() {
@@ -1670,13 +1823,474 @@ fn pane_contents(ui: &mut Ui, pane: &mut Pane, pane_index: usize) -> Vec<Action>
     actions
 }
 
-fn draw_header(ui: &mut Ui) {
+fn view_options(
+    ui: &mut Ui,
+    actions: &mut Vec<Action>,
+    sort: SortKey,
+    sort_desc: bool,
+    show_hidden: bool,
+    query: &str,
+) {
+    ui.set_min_width(210.0);
+    ui.label(RichText::new("보기 옵션").strong());
+    let mut query = query.to_owned();
+    if ui
+        .add(
+            egui::TextEdit::singleline(&mut query)
+                .hint_text("이름 필터")
+                .desired_width(200.0),
+        )
+        .changed()
+    {
+        actions.push(Action::SetQuery(query.clone()));
+    }
+    if !query.is_empty() && ui.button("필터 지우기").clicked() {
+        actions.push(Action::SetQuery(String::new()));
+        ui.close();
+    }
+
+    let mut hidden = show_hidden;
+    if ui.checkbox(&mut hidden, "숨김 항목 표시").changed() {
+        actions.push(Action::SetHidden(hidden));
+    }
+
+    ui.separator();
+    ui.menu_button(format!("정렬: {}", sort_label(sort)), |ui| {
+        for (key, label) in [
+            (SortKey::Name, "이름"),
+            (SortKey::Size, "크기"),
+            (SortKey::Modified, "수정일"),
+            (SortKey::Type, "유형"),
+        ] {
+            if ui.selectable_label(sort == key, label).clicked() {
+                actions.push(Action::SetSort(key));
+                ui.close();
+            }
+        }
+    });
+    let mut desc = sort_desc;
+    if ui.checkbox(&mut desc, "내림차순").changed() {
+        actions.push(Action::SetSortDesc(desc));
+    }
+
+    ui.separator();
+    if ui.button("새로 고침").clicked() {
+        actions.push(Action::Refresh);
+        ui.close();
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Icon {
+    Back,
+    Forward,
+    Up,
+    Refresh,
+    NewFolder,
+    Rename,
+    Delete,
+    Preview,
+    LayoutOne,
+    LayoutTwo,
+    LayoutFour,
+    ViewOptions,
+    Sun,
+    Moon,
+}
+
+fn icon_button(ui: &mut Ui, icon: Icon, tooltip: &str, selected: bool) -> Response {
+    let size = vec2(28.0, 24.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let visuals = ui.style().interact(&response);
+    let fill = if selected {
+        ui.visuals().selection.bg_fill
+    } else {
+        visuals.bg_fill
+    };
+    let stroke = if selected {
+        ui.visuals().selection.stroke
+    } else {
+        visuals.bg_stroke
+    };
+    let color = if selected {
+        ui.visuals().selection.stroke.color
+    } else {
+        visuals.fg_stroke.color
+    };
+    let painter = ui.painter();
+    painter.rect_filled(rect, 4.0, fill);
+    painter.rect_stroke(rect, 4.0, stroke, StrokeKind::Inside);
+    draw_icon(painter, icon, rect.shrink(6.0), color, fill);
+    response.on_hover_text(tooltip)
+}
+
+fn icon_button_enabled(ui: &mut Ui, enabled: bool, icon: Icon, tooltip: &str) -> Response {
+    if enabled {
+        return icon_button(ui, icon, tooltip, false);
+    }
+    let size = vec2(28.0, 24.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+    let color = ui.visuals().weak_text_color().gamma_multiply(0.45);
+    draw_icon(
+        ui.painter(),
+        icon,
+        rect.shrink(6.0),
+        color,
+        Color32::TRANSPARENT,
+    );
+    response.on_hover_text(tooltip)
+}
+
+fn draw_icon(painter: &Painter, icon: Icon, rect: Rect, color: Color32, bg: Color32) {
+    let stroke = Stroke::new(1.5, color);
+    let center = rect.center();
+    match icon {
+        Icon::Back => {
+            painter.line_segment(
+                [
+                    pos2(rect.right() - 1.0, center.y),
+                    pos2(rect.left() + 1.0, center.y),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    pos2(rect.left() + 1.0, center.y),
+                    pos2(rect.left() + 5.0, center.y - 4.0),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    pos2(rect.left() + 1.0, center.y),
+                    pos2(rect.left() + 5.0, center.y + 4.0),
+                ],
+                stroke,
+            );
+        }
+        Icon::Forward => {
+            painter.line_segment(
+                [
+                    pos2(rect.left() + 1.0, center.y),
+                    pos2(rect.right() - 1.0, center.y),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    pos2(rect.right() - 1.0, center.y),
+                    pos2(rect.right() - 5.0, center.y - 4.0),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    pos2(rect.right() - 1.0, center.y),
+                    pos2(rect.right() - 5.0, center.y + 4.0),
+                ],
+                stroke,
+            );
+        }
+        Icon::Up => {
+            painter.line_segment(
+                [
+                    pos2(center.x, rect.bottom() - 1.0),
+                    pos2(center.x, rect.top() + 1.0),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    pos2(center.x, rect.top() + 1.0),
+                    pos2(center.x - 4.0, rect.top() + 5.0),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    pos2(center.x, rect.top() + 1.0),
+                    pos2(center.x + 4.0, rect.top() + 5.0),
+                ],
+                stroke,
+            );
+        }
+        Icon::Refresh => {
+            let radius = rect.width() * 0.34;
+            let mut points = Vec::new();
+            for step in 0..=18 {
+                let angle = -0.65 + step as f32 / 18.0 * std::f32::consts::TAU * 0.82;
+                points.push(center + vec2(angle.cos(), angle.sin()) * radius);
+            }
+            painter.add(egui::Shape::line(points, stroke));
+            let tip = center + vec2(0.65f32.cos(), 0.65f32.sin()) * radius;
+            painter.line_segment([tip, tip + vec2(-4.5, -0.5)], stroke);
+            painter.line_segment([tip, tip + vec2(-1.0, 4.5)], stroke);
+        }
+        Icon::NewFolder => {
+            let tab = Rect::from_min_max(
+                pos2(rect.left() + 1.0, rect.top() + 1.0),
+                pos2(rect.left() + rect.width() * 0.58, rect.top() + 5.0),
+            );
+            painter.rect_filled(tab, 1.0, color);
+            let body = Rect::from_min_max(
+                pos2(rect.left() + 1.0, rect.top() + 4.0),
+                pos2(rect.right() - 1.0, rect.bottom() - 1.0),
+            );
+            painter.rect_stroke(body, 2.0, stroke, StrokeKind::Inside);
+            let plus = pos2(rect.right() - 3.0, rect.bottom() - 3.0);
+            painter.line_segment([plus - vec2(3.5, 0.0), plus + vec2(3.5, 0.0)], stroke);
+            painter.line_segment([plus - vec2(0.0, 3.5), plus + vec2(0.0, 3.5)], stroke);
+        }
+        Icon::Rename => {
+            let tip = pos2(rect.left() + 1.5, rect.bottom() - 1.5);
+            let end = pos2(rect.right() - 2.0, rect.top() + 2.0);
+            painter.line_segment([tip, end], Stroke::new(2.4, color));
+            painter.add(egui::Shape::convex_polygon(
+                vec![tip, tip + vec2(4.0, -1.0), tip + vec2(1.0, -4.0)],
+                color,
+                Stroke::NONE,
+            ));
+            painter.line_segment(
+                [end + vec2(-2.5, 2.5), end + vec2(0.5, -0.5)],
+                Stroke::new(1.5, color),
+            );
+        }
+        Icon::Delete => {
+            painter.line_segment(
+                [
+                    pos2(rect.left() + 2.0, rect.top() + 4.0),
+                    pos2(rect.right() - 2.0, rect.top() + 4.0),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    pos2(rect.left() + 5.0, rect.top() + 4.0),
+                    pos2(rect.left() + 6.0, rect.top() + 1.0),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    pos2(rect.left() + 6.0, rect.top() + 1.0),
+                    pos2(rect.right() - 6.0, rect.top() + 1.0),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    pos2(rect.right() - 6.0, rect.top() + 1.0),
+                    pos2(rect.right() - 5.0, rect.top() + 4.0),
+                ],
+                stroke,
+            );
+            let body = Rect::from_min_max(
+                pos2(rect.left() + 3.5, rect.top() + 5.5),
+                pos2(rect.right() - 3.5, rect.bottom() - 1.0),
+            );
+            painter.rect_stroke(body, 1.0, stroke, StrokeKind::Inside);
+            painter.line_segment(
+                [
+                    pos2(body.left() + 3.0, body.top() + 2.0),
+                    pos2(body.left() + 3.0, body.bottom() - 2.0),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    pos2(body.right() - 3.0, body.top() + 2.0),
+                    pos2(body.right() - 3.0, body.bottom() - 2.0),
+                ],
+                stroke,
+            );
+        }
+        Icon::Preview => {
+            let left = pos2(rect.left() + 0.5, center.y);
+            let right = pos2(rect.right() - 0.5, center.y);
+            let top = pos2(center.x, rect.top() + 2.0);
+            let bottom = pos2(center.x, rect.bottom() - 2.0);
+            let mut points = Vec::new();
+            for step in 0..=12 {
+                points.push(quadratic_bezier(left, top, right, step as f32 / 12.0));
+            }
+            for step in 0..=12 {
+                points.push(quadratic_bezier(right, bottom, left, step as f32 / 12.0));
+            }
+            painter.add(egui::Shape::line(points, stroke));
+            painter.circle_filled(center, rect.width() * 0.13, color);
+        }
+        Icon::LayoutOne => {
+            painter.rect_stroke(rect.shrink(1.0), 2.0, stroke, StrokeKind::Inside);
+        }
+        Icon::LayoutTwo => {
+            let outer = rect.shrink(1.0);
+            painter.rect_stroke(outer, 2.0, stroke, StrokeKind::Inside);
+            painter.line_segment(
+                [pos2(center.x, outer.top()), pos2(center.x, outer.bottom())],
+                stroke,
+            );
+        }
+        Icon::LayoutFour => {
+            let outer = rect.shrink(1.0);
+            painter.rect_stroke(outer, 2.0, stroke, StrokeKind::Inside);
+            painter.line_segment(
+                [pos2(center.x, outer.top()), pos2(center.x, outer.bottom())],
+                stroke,
+            );
+            painter.line_segment(
+                [pos2(outer.left(), center.y), pos2(outer.right(), center.y)],
+                stroke,
+            );
+        }
+        Icon::ViewOptions => {
+            for (offset, knob) in [(-4.5, 0.32), (0.0, 0.66), (4.5, 0.42)] {
+                let y = center.y + offset;
+                painter.line_segment(
+                    [pos2(rect.left() + 1.0, y), pos2(rect.right() - 1.0, y)],
+                    Stroke::new(1.2, color),
+                );
+                painter.circle_filled(pos2(rect.left() + 1.0 + rect.width() * knob, y), 2.0, color);
+            }
+        }
+        Icon::Sun => {
+            painter.circle_stroke(center, 3.3, stroke);
+            for step in 0..8 {
+                let angle = step as f32 * std::f32::consts::TAU / 8.0;
+                let direction = vec2(angle.cos(), angle.sin());
+                painter.line_segment(
+                    [center + direction * 5.2, center + direction * 7.0],
+                    Stroke::new(1.3, color),
+                );
+            }
+        }
+        Icon::Moon => {
+            painter.circle_filled(center + vec2(-0.5, 0.0), 5.2, color);
+            painter.circle_filled(center + vec2(2.0, -1.6), 4.7, bg);
+        }
+    }
+}
+
+fn quadratic_bezier(start: egui::Pos2, control: egui::Pos2, end: egui::Pos2, t: f32) -> egui::Pos2 {
+    let one_minus = 1.0 - t;
+    egui::Pos2::new(
+        one_minus * one_minus * start.x + 2.0 * one_minus * t * control.x + t * t * end.x,
+        one_minus * one_minus * start.y + 2.0 * one_minus * t * control.y + t * t * end.y,
+    )
+}
+
+struct Palette {
+    pane_active: Color32,
+    pane_inactive: Color32,
+    pane_border: Color32,
+    accent: Color32,
+    path_bg: Color32,
+    header_bg: Color32,
+    header_text: Color32,
+    row_selected: Color32,
+    row_hover: Color32,
+    text: Color32,
+    text_weak: Color32,
+    text_hidden: Color32,
+    badge_text: Color32,
+    danger: Color32,
+    splitter: Color32,
+    splitter_hover: Color32,
+}
+
+impl Palette {
+    fn from_visuals(visuals: &egui::Visuals) -> Self {
+        if visuals.dark_mode {
+            Self {
+                pane_active: Color32::from_rgb(29, 31, 35),
+                pane_inactive: Color32::from_rgb(23, 24, 27),
+                pane_border: Color32::from_rgb(49, 51, 56),
+                accent: Color32::from_rgb(80, 140, 230),
+                path_bg: Color32::from_rgb(34, 36, 41),
+                header_bg: Color32::from_rgb(34, 36, 41),
+                header_text: Color32::from_gray(145),
+                row_selected: Color32::from_rgb(43, 72, 111),
+                row_hover: Color32::from_rgb(37, 39, 44),
+                text: Color32::from_gray(222),
+                text_weak: Color32::from_gray(150),
+                text_hidden: Color32::from_gray(140),
+                badge_text: Color32::from_gray(245),
+                danger: Color32::from_rgb(240, 110, 110),
+                splitter: Color32::from_gray(43),
+                splitter_hover: Color32::from_gray(120),
+            }
+        } else {
+            Self {
+                pane_active: Color32::WHITE,
+                pane_inactive: Color32::from_rgb(246, 247, 249),
+                pane_border: Color32::from_rgb(210, 214, 220),
+                accent: Color32::from_rgb(30, 115, 210),
+                path_bg: Color32::from_rgb(243, 246, 250),
+                header_bg: Color32::from_rgb(237, 241, 246),
+                header_text: Color32::from_rgb(95, 100, 110),
+                row_selected: Color32::from_rgb(211, 229, 252),
+                row_hover: Color32::from_rgb(240, 243, 247),
+                text: Color32::from_rgb(28, 31, 36),
+                text_weak: Color32::from_rgb(100, 105, 112),
+                text_hidden: Color32::from_rgb(145, 150, 158),
+                badge_text: Color32::from_rgb(25, 25, 25),
+                danger: Color32::from_rgb(190, 40, 40),
+                splitter: Color32::from_rgb(208, 212, 218),
+                splitter_hover: Color32::from_rgb(130, 136, 146),
+            }
+        }
+    }
+}
+
+fn apply_theme(ctx: &egui::Context, theme: Theme) {
+    ctx.set_visuals_of(egui::Theme::Light, light_visuals());
+    ctx.set_visuals_of(egui::Theme::Dark, dark_visuals());
+    ctx.set_theme(match theme {
+        Theme::Light => egui::Theme::Light,
+        Theme::Dark => egui::Theme::Dark,
+    });
+}
+
+fn light_visuals() -> egui::Visuals {
+    let mut visuals = egui::Visuals::light();
+    visuals.panel_fill = Color32::from_rgb(247, 248, 250);
+    visuals.window_fill = Color32::WHITE;
+    visuals.extreme_bg_color = Color32::WHITE;
+    visuals.faint_bg_color = Color32::from_rgb(241, 243, 247);
+    visuals.code_bg_color = Color32::from_rgb(238, 241, 245);
+    visuals.selection.bg_fill = Color32::from_rgb(211, 229, 252);
+    visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgb(0, 70, 140));
+    visuals.hyperlink_color = Color32::from_rgb(0, 92, 197);
+    visuals.error_fg_color = Color32::from_rgb(190, 40, 40);
+    visuals.warn_fg_color = Color32::from_rgb(160, 100, 0);
+    visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(242, 244, 248);
+    visuals.widgets.inactive.bg_fill = Color32::from_rgb(236, 239, 244);
+    visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(231, 236, 244);
+    visuals.widgets.hovered.bg_fill = Color32::from_rgb(224, 231, 241);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(180, 188, 200));
+    visuals.widgets.active.bg_fill = Color32::from_rgb(211, 229, 252);
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0, Color32::from_rgb(0, 92, 197));
+    visuals
+}
+
+fn dark_visuals() -> egui::Visuals {
+    let mut visuals = egui::Visuals::dark();
+    visuals.panel_fill = Color32::from_rgb(22, 23, 26);
+    visuals.window_fill = Color32::from_rgb(29, 31, 35);
+    visuals.extreme_bg_color = Color32::from_rgb(18, 19, 22);
+    visuals.faint_bg_color = Color32::from_additive_luminance(5);
+    visuals.code_bg_color = Color32::from_rgb(40, 42, 47);
+    visuals.selection.bg_fill = Color32::from_rgb(43, 72, 111);
+    visuals.selection.stroke = Stroke::new(1.0, Color32::from_rgb(205, 225, 255));
+    visuals
+}
+
+fn draw_header(ui: &mut Ui, palette: &Palette) {
     let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(vec2(width, HEADER_HEIGHT), Sense::hover());
     let painter = ui.painter();
-    painter.rect_filled(rect, 0.0, Color32::from_rgb(34, 36, 41));
+    painter.rect_filled(rect, 0.0, palette.header_bg);
     let font = FontId::proportional(11.0);
-    let color = Color32::from_gray(145);
+    let color = palette.header_text;
     let (name_right, size_right, date_right, type_left) = columns(rect);
     painter.text(
         pos2(rect.left() + 8.0, rect.center().y),
@@ -1709,14 +2323,14 @@ fn draw_header(ui: &mut Ui) {
     let _ = name_right;
 }
 
-fn draw_row(ui: &mut Ui, entry: &Entry, selected: bool) -> egui::Response {
+fn draw_row(ui: &mut Ui, entry: &Entry, selected: bool, palette: &Palette) -> egui::Response {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(vec2(width, ROW_HEIGHT), Sense::click());
     let painter = ui.painter();
     let fill = if selected {
-        Color32::from_rgb(43, 72, 111)
+        palette.row_selected
     } else if response.hovered() {
-        Color32::from_rgb(37, 39, 44)
+        palette.row_hover
     } else {
         Color32::TRANSPARENT
     };
@@ -1744,14 +2358,14 @@ fn draw_row(ui: &mut Ui, entry: &Entry, selected: bool) -> egui::Response {
         Align2::CENTER_CENTER,
         badge_text,
         FontId::proportional(8.0),
-        Color32::from_gray(245),
+        palette.badge_text,
     );
 
     let (name_right, size_right, date_right, type_left) = columns(rect);
     let text_color = if entry.hidden {
-        Color32::from_gray(140)
+        palette.text_hidden
     } else {
-        Color32::from_gray(222)
+        palette.text
     };
     let name_rect = Rect::from_min_max(
         pos2(rect.left() + 26.0, rect.top()),
@@ -1765,7 +2379,7 @@ fn draw_row(ui: &mut Ui, entry: &Entry, selected: bool) -> egui::Response {
         text_color,
     );
 
-    let secondary = Color32::from_gray(150);
+    let secondary = palette.text_weak;
     painter.text(
         pos2(size_right, rect.center().y),
         Align2::RIGHT_CENTER,
@@ -1851,23 +2465,6 @@ fn sort_label(sort: SortKey) -> &'static str {
 
 fn tab_count(pane: &Pane) -> usize {
     pane.tabs.len()
-}
-
-fn truncate_path(path: &std::path::Path, max_chars: usize) -> String {
-    let text = path.display().to_string();
-    if text.chars().count() <= max_chars {
-        return text;
-    }
-    let keep = max_chars.saturating_sub(1);
-    let tail: String = text
-        .chars()
-        .rev()
-        .take(keep)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    format!("…{tail}")
 }
 
 fn install_fonts(ctx: &egui::Context) {
