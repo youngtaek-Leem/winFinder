@@ -46,6 +46,7 @@ struct Tab {
     show_hidden: bool,
     query: String,
     scroll: f32,
+    viewport_height: f32,
     loaded: bool,
     error: Option<String>,
 }
@@ -95,6 +96,7 @@ impl Tab {
             show_hidden: state.show_hidden,
             query: String::new(),
             scroll: state.scroll,
+            viewport_height: 0.0,
             loaded: false,
             error: None,
         }
@@ -515,7 +517,7 @@ impl WinFinderApp {
             };
             let entry = &tab.entries[tab.view[next]];
             tab.selected = Some(entry.path.clone());
-            tab.scroll = (next as f32 * ROW_HEIGHT - 4.0 * ROW_HEIGHT).max(0.0);
+            tab.scroll = scroll_to_show_row(next, tab.scroll, tab.viewport_height);
             true
         };
         if changed {
@@ -1327,6 +1329,20 @@ impl eframe::App for WinFinderApp {
     }
 }
 
+fn scroll_to_show_row(index: usize, scroll: f32, viewport_height: f32) -> f32 {
+    let row_top = index as f32 * ROW_HEIGHT;
+    let row_bottom = row_top + ROW_HEIGHT;
+    let viewport_height = viewport_height.max(ROW_HEIGHT);
+
+    if row_top < scroll {
+        row_top
+    } else if row_bottom > scroll + viewport_height {
+        row_bottom - viewport_height
+    } else {
+        scroll
+    }
+}
+
 fn pane_contents(ui: &mut Ui, pane: &mut Pane, pane_index: usize) -> Vec<Action> {
     let mut actions = Vec::new();
 
@@ -1489,6 +1505,7 @@ fn pane_contents(ui: &mut Ui, pane: &mut Pane, pane_index: usize) -> Vec<Action>
                 }
             }
         });
+    tab.viewport_height = output.inner_rect.height();
     tab.scroll = output.state.clamped_offset().y;
     if let Some(action) = action {
         actions.push(action);
@@ -1716,4 +1733,21 @@ fn install_fonts(ctx: &egui::Context) {
         .or_default()
         .push("pretendard".to_string());
     ctx.set_fonts(fonts);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keyboard_selection_scrolls_only_at_view_edges() {
+        let viewport = ROW_HEIGHT * 10.0;
+
+        assert_eq!(scroll_to_show_row(4, 0.0, viewport), 0.0);
+        assert_eq!(scroll_to_show_row(9, 0.0, viewport), 0.0);
+        assert_eq!(scroll_to_show_row(10, 0.0, viewport), ROW_HEIGHT);
+        assert_eq!(scroll_to_show_row(9, 5.0, viewport), 5.0);
+        assert_eq!(scroll_to_show_row(20, 5.0, viewport), ROW_HEIGHT * 11.0);
+        assert_eq!(scroll_to_show_row(0, 5.0, viewport), 0.0);
+    }
 }
