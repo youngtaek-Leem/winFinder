@@ -22,10 +22,27 @@ fn main() {
 }
 
 fn run() -> eframe::Result {
-    let session = winfinder_core::Session::load().unwrap_or_default();
+    let mut session = winfinder_core::Session::load().unwrap_or_default();
+    let path = path_argument();
+    let ephemeral = path.is_some();
+    if let Some(path) = path {
+        let active = session
+            .active_pane
+            .min(session.panes.len().saturating_sub(1));
+        if let Some(pane) = session.panes.get_mut(active) {
+            let tab = pane.active_tab.min(pane.tabs.len().saturating_sub(1));
+            if let Some(tab) = pane.tabs.get_mut(tab) {
+                tab.history = winfinder_core::History::new(path);
+                tab.selection.clear();
+                tab.selected = None;
+                tab.scroll = 0.0;
+            }
+        }
+    }
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([session.window.width, session.window.height])
         .with_min_inner_size([760.0, 500.0])
+        .with_drag_and_drop(false)
         .with_title("winFinder");
 
     if let Some(position) = session.window.position {
@@ -45,8 +62,21 @@ fn run() -> eframe::Result {
     eframe::run_native(
         "winFinder",
         options,
-        Box::new(move |cc| Ok(Box::new(app::WinFinderApp::new(cc, session)))),
+        Box::new(move |cc| Ok(Box::new(app::WinFinderApp::new(cc, session, ephemeral)))),
     )
+}
+
+fn path_argument() -> Option<PathBuf> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--path" {
+            return args.next().map(PathBuf::from);
+        }
+        if let Some(path) = arg.strip_prefix("--path=") {
+            return Some(PathBuf::from(path));
+        }
+    }
+    None
 }
 
 fn select_renderer() -> eframe::Renderer {

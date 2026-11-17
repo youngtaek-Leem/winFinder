@@ -28,6 +28,18 @@ impl History {
         self.index = self.stack.len() - 1;
     }
 
+    pub fn back_target(&self) -> Option<PathBuf> {
+        if self.index > 0 {
+            self.stack.get(self.index - 1).cloned()
+        } else {
+            None
+        }
+    }
+
+    pub fn forward_target(&self) -> Option<PathBuf> {
+        self.stack.get(self.index + 1).cloned()
+    }
+
     pub fn back(&mut self) -> Option<PathBuf> {
         if self.index > 0 {
             self.index -= 1;

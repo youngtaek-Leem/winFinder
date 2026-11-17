@@ -24,6 +24,9 @@ pub fn list_dir(path: &Path) -> io::Result<Vec<Entry>> {
             is_dir: metadata.is_dir(),
             size: if metadata.is_dir() { 0 } else { metadata.len() },
             modified: metadata.modified().ok(),
+            created: metadata.created().ok(),
+            accessed: metadata.accessed().ok(),
+            attributes: 0,
             hidden: name.starts_with('.'),
             extension,
         });
@@ -96,7 +99,10 @@ pub fn list_dir(path: &Path) -> io::Result<Vec<Entry>> {
                 } else {
                     ((data.nFileSizeHigh as u64) << 32) | data.nFileSizeLow as u64
                 },
-                modified: filetime_to_systemtime(&data),
+                modified: filetime_to_systemtime(&data.ftLastWriteTime),
+                created: filetime_to_systemtime(&data.ftCreationTime),
+                accessed: filetime_to_systemtime(&data.ftLastAccessTime),
+                attributes: attrs,
                 hidden,
                 extension,
             });
@@ -126,9 +132,8 @@ pub fn list_dir(path: &Path) -> io::Result<Vec<Entry>> {
 
 #[cfg(windows)]
 fn filetime_to_systemtime(
-    data: &windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW,
+    ft: &windows::Win32::Foundation::FILETIME,
 ) -> Option<std::time::SystemTime> {
-    let ft = data.ftLastWriteTime;
     let ticks = ((ft.dwHighDateTime as u64) << 32) | ft.dwLowDateTime as u64;
     if ticks == 0 {
         return None;

@@ -34,6 +34,9 @@ jobs:
       - name: Windows target check
         run: cargo check --workspace --target x86_64-pc-windows-msvc
 
+      - name: Windows target clippy
+        run: cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+
   windows-smoke:
     runs-on: windows-latest
     steps:

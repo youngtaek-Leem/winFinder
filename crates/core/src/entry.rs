@@ -3,6 +3,9 @@ use std::cmp::Ordering;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
+
 #[derive(Clone, Debug)]
 pub struct Entry {
     pub name: String,
@@ -10,13 +13,20 @@ pub struct Entry {
     pub is_dir: bool,
     pub size: u64,
     pub modified: Option<SystemTime>,
+    pub created: Option<SystemTime>,
+    pub accessed: Option<SystemTime>,
+    pub attributes: u32,
     pub hidden: bool,
     pub extension: String,
 }
 
 impl Entry {
     pub fn is_hidden(&self) -> bool {
-        self.hidden || self.name.starts_with('.')
+        self.hidden || self.attributes & FILE_ATTRIBUTE_HIDDEN != 0 || self.name.starts_with('.')
+    }
+
+    pub fn is_system(&self) -> bool {
+        self.attributes & FILE_ATTRIBUTE_SYSTEM != 0
     }
 
     pub fn type_label(&self) -> &str {
@@ -28,6 +38,18 @@ impl Entry {
             &self.extension
         }
     }
+
+    pub fn display_name(&self, show_extensions: bool) -> &str {
+        if show_extensions || self.is_dir {
+            &self.name
+        } else {
+            self.name
+                .rfind('.')
+                .filter(|index| *index > 0)
+                .map(|index| &self.name[..index])
+                .unwrap_or(&self.name)
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +58,8 @@ pub enum SortKey {
     Name,
     Size,
     Modified,
+    Created,
+    Accessed,
     Type,
 }
 
@@ -49,6 +73,8 @@ pub fn sort_entries(entries: &mut [Entry], key: SortKey, descending: bool) {
             SortKey::Name => natural_cmp(&a.name, &b.name),
             SortKey::Size => a.size.cmp(&b.size),
             SortKey::Modified => a.modified.cmp(&b.modified),
+            SortKey::Created => a.created.cmp(&b.created),
+            SortKey::Accessed => a.accessed.cmp(&b.accessed),
             SortKey::Type => a
                 .extension
                 .to_lowercase()
@@ -112,6 +138,9 @@ mod tests {
             is_dir: false,
             size: 0,
             modified: None,
+            created: None,
+            accessed: None,
+            attributes: 0,
             hidden: false,
             extension: String::new(),
         }
@@ -132,5 +161,12 @@ mod tests {
         let mut items = vec![entry("a-file"), folder];
         sort_entries(&mut items, SortKey::Name, false);
         assert!(items[0].is_dir);
+    }
+
+    #[test]
+    fn display_name_can_hide_extension() {
+        let item = entry("report.pdf");
+        assert_eq!(item.display_name(true), "report.pdf");
+        assert_eq!(item.display_name(false), "report");
     }
 }

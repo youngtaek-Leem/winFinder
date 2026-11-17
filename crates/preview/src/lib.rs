@@ -38,6 +38,28 @@ pub enum Preview {
     Error(String),
 }
 
+pub fn load_thumbnail(path: &Path, max: u32) -> Option<(Vec<u8>, u32, u32)> {
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    if !matches!(
+        extension.as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tif" | "tiff" | "ico" | "avif"
+    ) {
+        return None;
+    }
+    let reader = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?;
+    let image = reader.decode().ok()?.thumbnail(max, max);
+    let rgba = image.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    Some((rgba.into_raw(), width, height))
+}
+
 pub fn load(path: &Path) -> Preview {
     let extension = path
         .extension()

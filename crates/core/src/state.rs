@@ -1,11 +1,12 @@
 use crate::entry::SortKey;
 use crate::layout::{LayoutPreset, MAX_PANES, MAX_TABS_PER_PANE};
 use crate::nav::History;
+use crate::view::{ColumnWidths, ViewMode};
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub const STATE_VERSION: u32 = 3;
+pub const STATE_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
@@ -58,11 +59,23 @@ pub struct TabState {
     #[serde(default)]
     pub sort_desc: bool,
     #[serde(default)]
+    pub view: ViewMode,
+    #[serde(default)]
+    pub columns: ColumnWidths,
+    #[serde(default = "default_true")]
+    pub show_extensions: bool,
+    #[serde(default)]
     pub show_hidden: bool,
     #[serde(default)]
+    pub selection: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected: Option<PathBuf>,
     #[serde(default)]
     pub scroll: f32,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_split() -> f32 {
@@ -86,7 +99,11 @@ impl Default for TabState {
             history: History::new(default_dir()),
             sort: SortKey::Name,
             sort_desc: false,
+            view: ViewMode::Details,
+            columns: ColumnWidths::default(),
+            show_extensions: true,
             show_hidden: true,
+            selection: Vec::new(),
             selected: None,
             scroll: 0.0,
         }
@@ -141,6 +158,18 @@ impl Session {
             }
             for tab in &mut pane.tabs {
                 tab.history.normalize();
+                tab.columns = tab.columns.normalized();
+                if tab.selection.is_empty() {
+                    if let Some(selected) = tab.selected.take() {
+                        tab.selection.push(selected);
+                    }
+                } else {
+                    tab.selected = None;
+                }
+                tab.selection.dedup();
+                if tab.selection.len() > 100_000 {
+                    tab.selection.truncate(100_000);
+                }
             }
         }
 
@@ -215,7 +244,9 @@ mod tests {
             ..Session::default()
         };
         for pane in &mut session.panes {
-            pane.tabs = (0..20).map(|_| TabState::default()).collect();
+            pane.tabs = (0..MAX_TABS_PER_PANE + 20)
+                .map(|_| TabState::default())
+                .collect();
             pane.active_tab = 99;
         }
         session.normalize();

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const MAX_PANES: usize = 4;
-pub const MAX_TABS_PER_PANE: usize = 10;
+pub const MAX_TABS_PER_PANE: usize = 100;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LayoutPreset {
